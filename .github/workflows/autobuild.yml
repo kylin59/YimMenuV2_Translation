@@ -1,59 +1,173 @@
-    - name: Smart patch application
+name: Auto Build
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 每天 UTC 时间午夜运行
+  workflow_dispatch:      # 允许手动触发
+
+jobs:
+  create-release:
+    name: Auto Build
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+      
+    - name: Clone YimMenuV2
       shell: bash
       run: |
-        set -e
+        git clone --recursive https://github.com/YimMenu/YimMenuV2.git
+        cd YimMenuV2
+        echo "当前 YimMenu 版本: $(git log --oneline -1)"
+        
+    - name: Handle patches intelligently
+      shell: bash
+      run: |
+        set +e  # 允许继续执行即使有错误
         
         cd YimMenuV2
         
-        # 复制文件
-        cp ../*.py . 2>/dev/null || true
-        cp ../*.TTF . 2>/dev/null || true
+        echo "=== 开始处理补丁 ==="
         
-        if [ -f ../patch.diff ]; then
+        # 复制文件
+        cp ../*.py . 2>/dev/null || echo "没有找到.py文件"
+        cp ../*.TTF . 2>/dev/null || echo "没有找到.TTF文件"
+        
+        if [ ! -f ../patch.diff ]; then
+            echo "没有找到patch.diff文件，跳过补丁步骤"
+        else
             cp ../patch.diff .
             dos2unix patch.diff
             
-            echo "=== 分离补丁文件 ==="
-            # 将补丁分离为多个文件
-            csplit -f patch_part_ -z patch.diff '/^diff --git/' '{*}' 2>/dev/null || true
+            echo "=== 分析补丁文件 ==="
             
-            # 分别应用每个补丁文件
-            for patch_file in patch_part_*; do
-                if [ -f "$patch_file" ]; then
-                    echo "处理补丁: $patch_file"
+            # 统计补丁影响
+            echo "补丁包含以下修改:"
+            git apply --stat patch.diff 2>/dev/null || echo "无法显示统计信息"
+            
+            echo ""
+            echo "=== 逐步应用补丁 ==="
+            
+            # 方法1：尝试完整应用
+            echo "尝试完整应用补丁..."
+            if git apply patch.diff 2>/dev/null; then
+                echo "✓ 补丁完整应用成功"
+                PATCH_SUCCESS=true
+            else
+                echo "完整应用失败，开始分段应用"
+                PATCH_SUCCESS=false
+                
+                # 方法2：使用reject模式
+                echo "使用reject模式..."
+                git apply --reject patch.diff 2>&1 | grep -E "(Applied|Rejected|Checking)" || true
+                
+                # 检查结果
+                REJ_FILES=$(find . -name "*.rej" -type f 2>/dev/null)
+                if [ -n "$REJ_FILES" ]; then
+                    echo ""
+                    echo "⚠ 有以下拒绝文件:"
+                    echo "$REJ_FILES"
                     
-                    # 获取补丁文件名
-                    target_file=$(grep -m1 '^--- ' "$patch_file" | cut -d' ' -f2 | sed 's/^a\///')
-                    
-                    if [ -n "$target_file" ]; then
-                        echo "目标文件: $target_file"
+                    # 尝试手动解决关键文件
+                    for rej_file in $REJ_FILES; do
+                        filename=$(basename "$rej_file" .rej)
+                        echo "处理 $filename..."
                         
-                        # 检查文件是否存在
-                        if [ -f "$target_file" ]; then
-                            # 尝试应用
-                            if git apply --check "$patch_file" 2>/dev/null; then
-                                git apply "$patch_file"
-                                echo "✓ 成功应用"
-                            else
-                                echo "✗ 检查失败，尝试手动处理"
-                                # 保存原始文件备份
-                                cp "$target_file" "${target_file}.backup"
-                                # 尝试使用patch命令（更宽容）
-                                patch -p1 < "$patch_file" --merge --verbose 2>&1 | tail -10 || true
+                        # 对于关键文件，尝试手动合并
+                        if [[ "$filename" == "Menu" ]] || [[ "$filename" == "main" ]]; then
+                            echo "这是关键文件，尝试查找相似内容..."
+                            
+                            # 查看拒绝内容
+                            echo "拒绝的补丁内容:"
+                            head -30 "$rej_file"
+                            
+                            # 在实际文件中搜索相似模式
+                            search_pattern=$(grep -E '^[+-]' "$rej_file" | head -5 | sed 's/^[+-]//' | head -1)
+                            if [ -n "$search_pattern" ]; then
+                                echo "搜索模式: $search_pattern"
+                                grep -n "$search_pattern" "${rej_file%.rej}.cpp" 2>/dev/null || echo "未找到匹配"
                             fi
-                        else
-                            echo "⚠ 目标文件不存在: $target_file"
                         fi
-                    fi
+                    done
+                else
+                    echo "✓ 所有补丁已应用（可能有警告）"
+                    PATCH_SUCCESS=true
                 fi
-            done
+            fi
             
-            # 清理临时文件
-            rm -f patch_part_*
+            # 报告状态
+            if [ "$PATCH_SUCCESS" = true ]; then
+                echo "✅ 补丁处理完成"
+            else
+                echo "⚠ 补丁部分应用，有文件需要手动合并"
+                echo "但将继续执行构建..."
+            fi
         fi
         
-        # 执行其他任务
+        echo ""
+        echo "=== 处理字体文件 ==="
         if [ -f font.py ]; then
             python font.py
-            [ -f MainFont.cpp ] && mkdir -p src/game/frontend/fonts && mv MainFont.cpp src/game/frontend/fonts/
+            if [ -f MainFont.cpp ]; then
+                mkdir -p src/game/frontend/fonts
+                mv MainFont.cpp src/game/frontend/fonts/
+                echo "✓ 字体文件处理完成"
+            fi
+        else
+            echo "没有找到font.py，跳过字体处理"
         fi
+        
+        echo ""
+        echo "=== 补丁处理阶段完成 ==="
+
+    - name: Translate YimMenuV2
+      shell: bash
+      run: |
+        python update_translation.py
+        python translate.py
+    
+    - name: Setup MSVC environment
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: amd64
+
+    - name: Generate CMake project
+      shell: bash
+      run: |
+        cd YimMenuV2
+        cmake -D CMAKE_BUILD_TYPE=Release -S. -Bbuild -G Ninja
+        
+    - name: Build 64bit release DLL
+      shell: bash
+      run: |
+        cd YimMenuV2
+        cmake --build ./build --config Release --target YimMenuV2 --
+
+    - name: Create Release
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: latest
+        overwrite: true
+        name: Autobuild
+        body: |
+          Automatic build of YimMenu
+          Commit: ${{ github.sha }}
+        draft: false
+        prerelease: false
+        files: |
+          YimMenuV2/build/YimMenuV2.dll
+    
+    - name: Commit and update translation
+      shell: bash
+      run: |
+        git config user.name "github-actions"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add translation.json
+        git commit -m "Automated update"
+        git push
