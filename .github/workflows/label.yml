@@ -4,6 +4,7 @@ on:
   schedule:
     - cron: '0 0 * * *'  # 每天 UTC 时间午夜运行
   workflow_dispatch:      # 允许手动触发
+
 jobs:
   create-release:
     name: Auto Build
@@ -20,6 +21,7 @@ jobs:
         git clone --recursive https://github.com/YimMenu/YimMenuV2.git
 
     - name: Patch YimMenuV2
+      shell: bash  # 关键修改：使用 bash shell 而不是默认的 PowerShell
       run: |
         cd YimMenuV2
         cp ../*.py .
@@ -28,9 +30,10 @@ jobs:
         dos2unix patch.diff
         git apply patch.diff || exit 1
         python font.py
-        mv MainFont.cpp src/game/frontend/fonts -Force
+        mv MainFont.cpp src/game/frontend/fonts -f
 
     - name: Translate YimMenuV2
+      shell: bash
       run: |
         python update_translation.py
         python translate.py
@@ -41,11 +44,13 @@ jobs:
         arch: amd64
 
     - name: Generate CMake project
+      shell: bash
       run: |
         cd YimMenuV2
         cmake -D CMAKE_BUILD_TYPE=Release -S. -Bbuild -G Ninja
         
     - name: Build 64bit release DLL
+      shell: bash
       run: |
         cd YimMenuV2
         cmake --build ./build --config Release --target YimMenuV2 --
@@ -68,6 +73,7 @@ jobs:
           YimMenuV2/build/YimMenuV2.dll
     
     - name: Commit and update translation
+      shell: bash
       run: |
         git config user.name "github-actions"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
