@@ -1,0 +1,59 @@
+    - name: Smart patch application
+      shell: bash
+      run: |
+        set -e
+        
+        cd YimMenuV2
+        
+        # 复制文件
+        cp ../*.py . 2>/dev/null || true
+        cp ../*.TTF . 2>/dev/null || true
+        
+        if [ -f ../patch.diff ]; then
+            cp ../patch.diff .
+            dos2unix patch.diff
+            
+            echo "=== 分离补丁文件 ==="
+            # 将补丁分离为多个文件
+            csplit -f patch_part_ -z patch.diff '/^diff --git/' '{*}' 2>/dev/null || true
+            
+            # 分别应用每个补丁文件
+            for patch_file in patch_part_*; do
+                if [ -f "$patch_file" ]; then
+                    echo "处理补丁: $patch_file"
+                    
+                    # 获取补丁文件名
+                    target_file=$(grep -m1 '^--- ' "$patch_file" | cut -d' ' -f2 | sed 's/^a\///')
+                    
+                    if [ -n "$target_file" ]; then
+                        echo "目标文件: $target_file"
+                        
+                        # 检查文件是否存在
+                        if [ -f "$target_file" ]; then
+                            # 尝试应用
+                            if git apply --check "$patch_file" 2>/dev/null; then
+                                git apply "$patch_file"
+                                echo "✓ 成功应用"
+                            else
+                                echo "✗ 检查失败，尝试手动处理"
+                                # 保存原始文件备份
+                                cp "$target_file" "${target_file}.backup"
+                                # 尝试使用patch命令（更宽容）
+                                patch -p1 < "$patch_file" --merge --verbose 2>&1 | tail -10 || true
+                            fi
+                        else
+                            echo "⚠ 目标文件不存在: $target_file"
+                        fi
+                    fi
+                fi
+            done
+            
+            # 清理临时文件
+            rm -f patch_part_*
+        fi
+        
+        # 执行其他任务
+        if [ -f font.py ]; then
+            python font.py
+            [ -f MainFont.cpp ] && mkdir -p src/game/frontend/fonts && mv MainFont.cpp src/game/frontend/fonts/
+        fi
